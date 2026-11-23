@@ -431,6 +431,97 @@ local function serverHop()
     end
 end
 
+-- ─── Roblox Server List API ──────────────────────────────────
+-- Fetches all public servers for this place via the Roblox Games API.
+-- Returns array of {id, playing, maxPlayers} or nil on failure.
+local function fetchServerList(limit)
+    if not httpRequest then return nil end
+    local ok, res = pcall(function()
+        return httpRequest({
+            Url    = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=%d",
+                game.PlaceId, limit or 100
+            ),
+            Method = "GET",
+            Headers = { ["Content-Type"] = "application/json" },
+        })
+    end)
+    if not ok or not res or not res.Body then return nil end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+    if not ok2 or type(data) ~= "table" or not data.data then return nil end
+    return data.data  -- array of server entries
+end
+
+-- Auto-hop scan state
+local autoHopActive  = false
+local autoHopMinVal  = 50
+
+local function startAutoHopScan(minValue)
+    if autoHopActive then return end
+    autoHopActive = true
+    task.spawn(function()
+        while autoHopActive do
+            task.wait(6)  -- let the game finish loading after a teleport
+            if not autoHopActive then break end
+
+            local list    = getLocalEggList()
+            local bestVal = (list[1] and list[1].value) or 0
+
+            reportServerToFinder()  -- share this server's data while here
+
+            if bestVal >= minValue then
+                pcall(function()
+                    Rayfield:Notify({
+                        Title   = "✅ Found Server!",
+                        Content = string.format("Best: %s (~%dB/s)", list[1].name, bestVal),
+                        Duration = 10,
+                    })
+                end)
+                autoHopActive = false
+                break
+            end
+
+            -- Pull live server list from Roblox API
+            local servers = fetchServerList(100)
+            local jumped  = false
+            if servers and #servers > 0 then
+                local candidates = {}
+                for _, s in ipairs(servers) do
+                    if s.id and s.id ~= tostring(game.JobId) then
+                        candidates[#candidates+1] = s
+                    end
+                end
+                if #candidates > 0 then
+                    local pick = candidates[math.random(1, math.min(#candidates, 20))]
+                    pcall(function()
+                        Rayfield:Notify({
+                            Title   = "🌍 Scanning…",
+                            Content = string.format(
+                                "Hopping to server (%d/%d players) — best so far: %dB/s",
+                                pick.playing or 0, pick.maxPlayers or 0, bestVal
+                            ),
+                            Duration = 4,
+                        })
+                    end)
+                    task.wait(2)
+                    pcall(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, pick.id, LP)
+                    end)
+                    jumped = true
+                end
+            end
+            if not jumped then
+                -- Fallback: random server hop
+                pcall(function()
+                    Rayfield:Notify({ Title="🌍 Scanning…", Content="API unavailable — random hop.", Duration=3 })
+                end)
+                serverHop()
+            end
+            task.wait(8)
+        end
+    end)
+end
+
 -- ─── Supabase Reporter ───────────────────────────────────────
 -- Sends this server's best egg snapshot every 30s.
 -- Other players running EggBreaker contribute their server too,
@@ -830,6 +921,43 @@ FinderTab:CreateButton({
     Callback = function()
         Rayfield:Notify({ Title="Server Hop", Content="Teleporting to a new server…", Duration=3 })
         task.delay(1, serverHop)
+    end,
+})
+
+FinderTab:CreateDivider()
+FinderTab:CreateSection("🌍 Auto-Hop Server Scanner")
+FinderTab:CreateLabel("Fetches ALL live servers from Roblox, hops through them and stops when eggs ≥ your threshold.")
+
+FinderTab:CreateSlider({
+    Name         = "Stop When Best Egg ≥ (B/s)",
+    Range        = {0, 500},
+    Increment    = 10,
+    CurrentValue = 50,
+    Flag         = "AutoHopMinVal",
+    Callback     = function(v) autoHopMinVal = v end,
+})
+
+FinderTab:CreateButton({
+    Name = "🌍 Start Auto-Hop Scan",
+    Callback = function()
+        if not httpRequest then
+            Rayfield:Notify({ Title="Scanner", Content="Executor needs HTTP support (request / http_request).", Duration=4 })
+            return
+        end
+        if autoHopActive then
+            Rayfield:Notify({ Title="Scanner", Content="Already running. Click Stop first.", Duration=3 })
+            return
+        end
+        Rayfield:Notify({ Title="🌍 Scanner", Content="Starting — will hop servers until eggs ≥ "..tostring(autoHopMinVal).."B/s", Duration=4 })
+        startAutoHopScan(autoHopMinVal)
+    end,
+})
+
+FinderTab:CreateButton({
+    Name = "⏹ Stop Auto-Hop",
+    Callback = function()
+        autoHopActive = false
+        Rayfield:Notify({ Title="Scanner", Content="Auto-hop stopped.", Duration=2 })
     end,
 })
 
